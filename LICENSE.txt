@@ -1,0 +1,11 @@
+This project is licensed under the terms of the GNU GPL ver. 2 or 3.
+Copyright (c) 2011-2017 by Thomas Kremer.
+
+The only exception is the font in consolefont_tiny.pgm and testfont.h,
+which seems to be the font
+  "-misc-fixed-medium-r-normal--8-80-75-75-c-50-iso8859-1"
+(actually just a screenshot of it).
+Author: Markus Kuhn, License: "Public domain font.  Share and enjoy."
+Original source: https://www.x.org/releases/individual/font/font-misc-misc-1.0.0.tar.bz2
+
+
