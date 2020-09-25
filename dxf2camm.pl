@@ -29,7 +29,7 @@ sub dxf_extract_polylines {
     die "invalid number of coordinates in lwpolyline"
       unless ref $x eq "ARRAY" && @$x == @$y && @$x >= 1;
     my $closed = $e->{attrs}{int} & 1;
-    my @points = map [$$x[$_],$$y[$_]], 0..$#$x;
+    my @points = map [0+$$x[$_],0+$$y[$_]], 0..$#$x;
     push @res, [($closed?"closed":"open"),\@points];
   }
   check_polylines(\@res,"extract");
@@ -167,6 +167,48 @@ sub sort_polylines {
     }
   }
   return [@$lines[@perm]];
+}
+
+sub add_overlap {
+  my ($lines,$overlap) = @_;
+  check_polylines($lines,"overlap");
+  my @res = @$lines;
+  for (@res) {
+    my $points = $$_[1];
+    undef $_, next if @$points < 2;
+    $_ = [@$_];
+    $points = [@$points];
+    $$_[1] = $points;
+    my $closed = $$_[0] eq "closed";
+    next if !$closed;
+    $$_[0] = "open";
+    my @add;
+    my $p = $$points[0];
+    #die "wtf: $p, @$p" if ref $p ne "ARRAY" || @$p != 2 || !defined $$p[0] || !defined $$p[1];
+    my $d = 0;
+    for my $q (@$points[1..$#$points]) {
+      my $d2 = 0;
+      #die "wtf2: $q, @$q" if ref $q ne "ARRAY" || @$q != 2 || !defined $$q[0] || !defined $$q[1];
+      $d2 += ($$p[$_]-$$q[$_])**2 for 0..1;
+      $d2 = sqrt($d2);
+      if ($d+$d2 < $overlap*2) {
+        # we accept up to 2*overlap, if it means we can end in a corner.
+        # -> less calculating, more probable that we actually hit our line.
+        push @add,$q;
+        $d += $d2;
+        last if $d >= $overlap;
+      } else {
+        # we have to cut the line short.
+        my $t = ($overlap-$d)/$d2;
+        my @q2 = map $$p[$_]*(1-$t) + $$q[$_]*$t, 0,1;
+        push @add,\@q2;
+        last;
+      }
+      $p = $q;
+    }
+    push @$points, @add;
+  }
+  return \@res;
 }
 
 sub coarsify_polylines {
@@ -434,6 +476,7 @@ sub usage {
 %opts_explained = (
   output => "Write CAMM data to this file instead of stdout.",
   offset => "Set knive offset to this value (mm).",
+  overlap => "add this much (mm) of the start of a loop to its end to make it overlap.",
   raw => "Don't emit header/footer commands.",
   relative => "Use relative commands when possible (better compression).",
   epsilon => "jump over line segments of at most this length.",
@@ -449,7 +492,7 @@ sub usage {
   help => "Show this help screen.",
 );
 
-@opts = qw(output|o=s offset|off=f raw! relative! epsilon=f shortline=f smallangle=f coarsify=f combine! combine_cycles|cycles! combine_reverse|reverse! translate=s scale=f sort=s help|h|?);
+@opts = qw(output|o=s offset|off=f overlap=f raw! relative! epsilon=f shortline=f smallangle=f coarsify=f combine! combine_cycles|cycles! combine_reverse|reverse! translate=s scale=f sort=s help|h|?);
 
 GetOptions(\%opts,@opts) or usage(2);
 
@@ -471,6 +514,9 @@ $dxf->flatten;
 
 my $paths = dxf_extract_polylines($dxf);
 
+$paths = combine_polylines($paths,$opts{combine_cycles},$opts{combine_reverse})
+  if $opts{combine};
+
 for (@$paths) { # a path
   for my $p (@{$$_[1]}) { # a point
     if (defined $opts{translate}) {
@@ -483,10 +529,10 @@ for (@$paths) { # a path
   }
 }
 
-$paths = combine_polylines($paths,$opts{combine_cycles},$opts{combine_reverse})
-  if $opts{combine};
 $paths = coarsify_polylines($paths,$opts{coarsify}*CAMM::units_per_mm)
   if $opts{coarsify};
+$paths = add_overlap($paths,$opts{overlap}*CAMM::units_per_mm)
+  if $opts{overlap};
 #$CAMM::units_per_mm/4);
 $paths = sort_polylines($paths,$opts{sort})
   if defined $opts{sort};
