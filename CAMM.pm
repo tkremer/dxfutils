@@ -596,14 +596,14 @@ our %camm2svg_commands;
 our $svg_template = <<'EOSVG';
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="%f" height="%f">
-<g transform='scale(0.025,-0.025) translate(%f,%f)'>
+<g transform='scale(%f,%f) translate(%f,%f)' style='stroke-width: 40px; fill:#000000; fill-opacity:0.2;'>
 %s
 </g>
 </svg>
 EOSVG
 
 our $svg_path_template = <<'EOSVG';
-  <path d="%s" style='stroke:%s; stroke-width: 40px; fill:#000000; fill-opacity:0.2;' />
+  <path d="%s" style='stroke:%s;' />
 EOSVG
 
 sub to_svgpath {
@@ -636,7 +636,11 @@ sub to_svgpath {
   return $d;
 }
 
-# TODO: convert mm to pixels
+# DONE: convert mm to pixels
+# 96 px = 1 in = 25.4 mm
+
+my $units_per_px = $units_per_mm * 25.4/96; #$mm_per_in * $in_per_px
+
 sub to_svg {
   my ($self,$camm,$split,$colored) = @_;
   #$self = $self->new unless ref $self;
@@ -645,7 +649,7 @@ sub to_svg {
   my $win = $self->{input_window};
   my @origin = (0,0);
   my @size = (100,100);
-  my $scale = 1/$units_per_mm;
+  my $scale = 1/$units_per_px;
   if (defined $win) {
     @origin = @$win[0,3];
     $_ = -$_ for @origin;
@@ -654,7 +658,7 @@ sub to_svg {
   my $color = "black";
   my @paths;
   if ($split) {
-    @paths = split /(?=M )/, $d;
+    @paths = grep !/^M $florex,$florex *$/, split /(?=M )/, $d;
     my $i = 0;
     for (@paths) {
       $color = sprintf "#%02x%02x%02x", map 127*(1+cos(($i/@paths*5/6-$_/3)*2*pi)),0..2
@@ -665,7 +669,7 @@ sub to_svg {
   } else {
     @paths = (sprintf $svg_path_template, $d, $color);
   }
-  return sprintf $svg_template, @size, @origin, join("",@paths);
+  return sprintf $svg_template, @size, $scale, -$scale, @origin, join("",@paths);
 }
 
 1;
