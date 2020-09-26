@@ -329,56 +329,79 @@ sub from_polylines {
   @options{qw(header footer)} = (1,1) if $options{headerfooter};
   $self->header() if $options{header};
   my $eps = $options{epsilon}//0.00001;
+  # since the knife follows the machine's current (pen) position by an offset,
+  # we need to keep track of the knife's position as well as the pen position.
+  my $knife = [0,0]; # current position of knife
+  my $pen = [0,0];   # current position of pen/knife-holder
+  my $last_dp = undef; # last point[i]-point[i-1] (=something*(pen-knife))
+  # Note, that we cannot know the starting direction of the knife.
+  # DONE: make a "calibration" line at the start to determine the knife direction.
   for (@$paths) {
     my $points = $$_[1];
-    $self->moveto(@{$$points[0]});
     if ($options{offset}) { # if offset = 0, use the other code as well.
       my $offs = $options{offset};
       my $short_line = $options{shortline}//80; # 1.5mm is small.
       my $small_angle = $options{smallangle}//10; # 10° is small.
-      my @p = @{$$points[0]};
-      my $first = 1;
-      for my $i (1..$#$points) {
-        my $pt = $$points[$i];
-        my @q = ($$pt[0]-$p[0],$$pt[1]-$p[1]);
-        my $l = sqrt($q[0]**2+$q[1]**2);
-        next unless $l > $eps;
+      # DONE: maybe add ($pen-$knife) here
+      # TODO: does the knife keep its direction during movetos?
+      $last_dp = undef if $options{offsetless_start};
+      $knife = $$points[0];
+      if (defined $last_dp) {
+        my $l = sqrt($$last_dp[0]**2+$$last_dp[1]**2);
+        $pen = [map $$knife[$_]+$$last_dp[$_]*($offs/$l), 0,1];
+      } else {
+        $pen = $knife;
+      }
+      $self->moveto(@$pen);
+      for (my $i = 1; $i < @$points; $i++) {
+        my ($pt,@q,$l);
+        for (;$i < @$points;$i++) {
+        #for my $j ($i+1 .. $#$points) { # implicit $i < $#$points
+          $pt = $$points[$i];
+          @q = ($$pt[0]-$$knife[0],$$pt[1]-$$knife[1]);
+          $l = sqrt($q[0]**2+$q[1]**2);
+          last if $l > $eps;
+          # $i++, next unless $l > $eps;
+        }
+        last if $i >= @$points;
+        # TODO: since arcs are rather slow, we might want to avoid real
+        # arcs here and use a polyline approximation instead.
+        # arg(q2/q1) = arg(q2*conj(q1))
+        if (defined $last_dp) {
+          my $angle = 180/pi*
+               atan2($q[1]*$$last_dp[0]-$q[0]*$$last_dp[1], $q[0]*$$last_dp[0]+$q[1]*$$last_dp[1]);
+          # if the angle is small and the next line is short, we assume an
+          # interpolated curved line. No need to emphasize the corners.
+          if (abs($angle) > $small_angle || $l > $short_line) {
+            $self->arc(@$knife,$angle);
+          }
+          $pen = [map $$knife[$_]+$q[$_]*($offs/$l), 0,1];
+        }
+        # now:
+        #   knife is at $knife = $points[k] for some k < i
+        #   pen is at $knife+$offs*(points[i]-$knife)°
+
         my @r = @q;
-        if ($first) {
+        if (!defined $last_dp) {
           $_ *= 1+$offs/$l for @q;
         }
-        $_ *= -$offs/$l for @r;
-        @p = @$pt;
-        $first = 0;
+        $_ *= $offs/$l for @r;
+        $knife = $pt;
+        $last_dp = \@q;
 
         # sadly, we can't use relative coordinates here, because we don't
         # know how arc end coordinates are rounded by the device.
 
         #$res .= CAMM::lineto_relative(@q);
         #$res .= CAMM::lineto($$pt[0],$$pt[1]);
-        #my @q_abs = map lround($$pt[$_]-$r[$_]), 0,1;
-        my @q_abs = map $$pt[$_]-$r[$_], 0,1;
-        $self->lineto(@q_abs);
-        for my $j ($i+1 .. $#$points) { # implicit $i < $#$points
-          my $pt2 = $$points[$j];
-          my @q2 = ($$pt2[0]-$$pt[0],$$pt2[1]-$$pt[1]);
-          my $l2 = sqrt($q2[0]**2+$q2[1]**2);
-          next unless $l2 > $eps;
-          # TODO: since arcs are rather slow, we might want to avoid real
-          # arcs here and use a polyline approximation instead.
-          # arg(q2/q1) = arg(q2*conj(q1))
-          my $angle = 180/pi*
-               atan2($q2[1]*$q[0]-$q2[0]*$q[1], $q2[0]*$q[0]+$q2[1]*$q[1]);
-          #$res .= arc_relative(@r,$angle);
-          # if the angle is small and the next line is short, we assume an
-          # interpolated curved line. No need to emphasize the corners.
-          if (abs($angle) > $small_angle || $l2 > $short_line) {
-            $self->arc(@p,$angle);
-          }
-          last;
-        }
+        $pen = [map $$knife[$_]+$r[$_], 0,1];
+        $self->lineto(@$pen);
+        # now:
+        #   knife is at $knife = $pt = $points[i]
+        #   pen is at $knife+$offs*($knife-points[k])° for last k<i
       }
     } else {
+      $self->moveto(@{$$points[0]});
       my @coords;
       if ($options{relative}) {
         my @p = @{$$points[0]};

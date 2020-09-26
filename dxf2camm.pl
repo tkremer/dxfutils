@@ -102,14 +102,14 @@ sub partial_sort {
   @$array = @res;
 }
 
-sub sort_polylines {
-  my ($lines,$order) = @_;
-  check_polylines($lines,"sort");
+sub compute_bboxes {
+  my ($lines) = @_;
+  check_polylines($lines,"bboxes");
 
   my @bboxes;
 
   for (@$lines) {
-    my $bbox = [$$_[1][0],$$_[1][0]];
+    #my $bbox = [$$_[1][0],$$_[1][0]];
     my @bbox = (undef)x4;
     for my $p (@{$$_[1]}) {
       for (0,1) {
@@ -121,6 +121,41 @@ sub sort_polylines {
     }
     push @bboxes, \@bbox;
   }
+  return \@bboxes;
+}
+
+sub bbox_union {
+  my ($bboxes) = @_;
+  my @bbox = (undef)x4;
+  for my $b (@$bboxes) {
+    for (0..3) {
+      my $sign = $_ <= 1 ? 1 : -1;
+      $bbox[$_] = $$b[$_]
+        if !defined $bbox[$_] || $bbox[$_]*$sign > $$b[$_]*$sign;
+    }
+  }
+  return \@bbox;
+}
+
+sub sort_polylines {
+  my ($lines,$bboxes,$order) = @_;
+  check_polylines($lines,"sort");
+
+  # my @bboxes;
+
+  # for (@$lines) {
+  #   my $bbox = [$$_[1][0],$$_[1][0]];
+  #   my @bbox = (undef)x4;
+  #   for my $p (@{$$_[1]}) {
+  #     for (0,1) {
+  #       $bbox[$_] = $$p[$_]
+  #         if !defined $bbox[$_] || $bbox[$_] > $$p[$_];
+  #       $bbox[$_+2] = $$p[$_]
+  #         if !defined $bbox[$_+2] || $bbox[$_+2] < $$p[$_];
+  #     }
+  #   }
+  #   push @bboxes, \@bbox;
+  # }
   # bboxes are calculated correctly:
   #@$lines = map ["closed",[[@$_[0,1]],[@$_[2,1]],[@$_[2,3]],[@$_[0,3]],[@$_[0,1]]]], @bboxes;
 
@@ -160,13 +195,13 @@ sub sort_polylines {
   my @perm = 0..$#$lines;
   for my $crit (reverse @criteria) {
     if (ref $crit eq "CODE") {
-      partial_sort(sub {$crit->($bboxes[$a],$bboxes[$b])},\@perm);
+      partial_sort(sub {$crit->($$bboxes[$a],$$bboxes[$b])},\@perm);
       #@perm = sort {$crit->($bboxes[$a],$bboxes[$b])} @perm;
     } else {
-      @perm = sort {($bboxes[$a][$$crit[0]] <=> $bboxes[$b][$$crit[0]])*$$crit[1]} @perm;
+      @perm = sort {($$bboxes[$a][$$crit[0]] <=> $$bboxes[$b][$$crit[0]])*$$crit[1]} @perm;
     }
   }
-  return [@$lines[@perm]];
+  return ([@$lines[@perm]],[@$bboxes[@perm]]);
 }
 
 sub add_overlap {
@@ -469,6 +504,7 @@ sub usage {
   combine => 1,
   combine_cycles => 1,
   combine_reverse => 1,
+  align_knife => 1,
   scale => 1,
   help => sub { usage(0); },
 );
@@ -476,6 +512,9 @@ sub usage {
 %opts_explained = (
   output => "Write CAMM data to this file instead of stdout.",
   offset => "Set knive offset to this value (mm).",
+  offsetless_start => "Start each polyline without knife offset.",
+  bbox => "Add a bounding box with this much spacing.",
+  align_knife => "Begin with a small cut at [0,0]->[0,2] to align the knife.",
   overlap => "add this much (mm) of the start of a loop to its end to make it overlap.",
   raw => "Don't emit header/footer commands.",
   relative => "Use relative commands when possible (better compression).",
@@ -492,7 +531,7 @@ sub usage {
   help => "Show this help screen.",
 );
 
-@opts = qw(output|o=s offset|off=f overlap=f raw! relative! epsilon=f shortline=f smallangle=f coarsify=f combine! combine_cycles|cycles! combine_reverse|reverse! translate=s scale=f sort=s help|h|?);
+@opts = qw(output|o=s offset|off=f offsetless_start! bbox=f align_knife! overlap=f raw! relative! epsilon=f shortline=f smallangle=f coarsify=f combine! combine_cycles|cycles! combine_reverse|reverse! translate=s scale=f sort=s help|h|?);
 
 GetOptions(\%opts,@opts) or usage(2);
 
@@ -503,6 +542,11 @@ $opts{offset} *= CAMM::units_per_mm if defined $opts{offset};
 $opts{shortline} *= CAMM::units_per_mm if defined $opts{shortline};
 $opts{translate} = [split /,/,$opts{translate}] if defined $opts{translate};
 
+# we don't want the bbox to cause negative coordinates.
+if ($opts{bbox}) {
+  $opts{translate} //= [0,0];
+  $opts{translate}[$_] += $opts{bbox} for 0,1;
+}
 
 my $dxffile = shift;
 ## TODO: get paths from dxf in a good way.
@@ -531,11 +575,24 @@ for (@$paths) { # a path
 
 $paths = coarsify_polylines($paths,$opts{coarsify}*CAMM::units_per_mm)
   if $opts{coarsify};
+
+my $bboxes = compute_bboxes($paths);
+my $bbox = bbox_union($bboxes);
+
+($paths,$bboxes) = sort_polylines($paths,$bboxes,$opts{sort})
+  if defined $opts{sort};
+
+unshift @$paths, ["open",[[0,0],[0,2*CAMM::units_per_mm]]]
+  if $opts{align_knife};
+
+if (defined $opts{bbox}) {
+  my @box = @$bbox;
+  $box[$_] -= $opts{bbox}*CAMM::units_per_mm*($_ <= 1 ? 1 : -1) for 0..3;
+  push @$paths, ["closed",[map [@box[2*($_&1),($_&2)+1]], 0,1,3,2,0]];
+}
+
 $paths = add_overlap($paths,$opts{overlap}*CAMM::units_per_mm)
   if $opts{overlap};
-#$CAMM::units_per_mm/4);
-$paths = sort_polylines($paths,$opts{sort})
-  if defined $opts{sort};
 
 my $camm = CAMM->from_polylines($paths,%opts);
 #headerfooter=>1,offset=>10*$CAMM::units_per_mm);
