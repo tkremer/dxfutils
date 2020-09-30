@@ -619,7 +619,7 @@ our %camm2svg_commands;
 our $svg_template = <<'EOSVG';
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="%f" height="%f">
-<g transform='scale(%f,%f) translate(%f,%f)' style='stroke-width: 40px; fill:#000000; fill-opacity:0.2;'>
+<g transform='scale(%f,%f) translate(%f,%f)' style='stroke-width: 40px; fill:#000000; fill-opacity:0.1;'>
 %s
 </g>
 </svg>

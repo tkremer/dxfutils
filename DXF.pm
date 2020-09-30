@@ -845,7 +845,7 @@ my %replacers = (
       my $fn = 20;
       while (@sx >= 4) {
         # TODO: subdivide by angle first. Estimate curvature.
-        for my $i (1..$fn) {
+        for my $i (1..$fn-1) {
           my $t = $i/$fn;
           my $x1 =   $sx[0]*(1-$t)**3  + 3*$sx[1]*(1-$t)**2*$t
                  + 3*$sx[2]*(1-$t)*$t**2 + $sx[3]*$t**3;
@@ -856,6 +856,8 @@ my %replacers = (
           #push @coords,$x1,$y1;
           #@p = ($x1,$y1);
         }
+        push @x, $sx[3]; # want to avoid any rounding errors
+        push @y, $sy[3];
         splice @sx,0,3;
         splice @sy,0,3;
       }

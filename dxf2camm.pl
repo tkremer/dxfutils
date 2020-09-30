@@ -20,6 +20,126 @@ use DXF;
 use CAMM;
 use Getopt::Long qw(:config bundling);
 
+{
+  package PathSet;
+  use POSIX qw(floor);
+  # The PathSet stores a set of path-like elements
+  #   indexed by startpoint and endpoint.
+  # The get() method can retrieve the element with a start- or endpoint closest
+  #   to a point given that it is less than $epsilon away from that point.
+  sub new {
+    my ($class,$epsilon) = @_;
+    $epsilon //= 0;
+    # one hash key is responsible for a 1/$f-sized box.
+    my $f = $epsilon != 0 ? 1/$epsilon : 1000000;
+    return bless { eps => $epsilon, eps2 => $epsilon**2,
+                   f => $f, start => {}, end => {} },
+                 ref $class || $class;
+  }
+
+  # The internal hash keys that a point maps to.
+  sub _hks {
+    my ($self,$p) = @_;
+    my $f = $self->{f};
+    my @q = map floor($_*$f), @$p;
+    # FIXED: I think this is the only place where dim=2 is hard-coded.
+    #return map join(";",($q[0]+$_&1,$q[1]+(($_&2)>>1))), 0..3;
+    # NOTE: This approach limits the dimension to max 32 or 64, but at these
+    #       levels the whole structure would be extremely expensive anyway.
+    my $dim = @q;
+    return map {
+      my $x = $_;
+      join(";",map $q[$_]+(($x >> $_)&1), 0..$dim-1);
+    } 0..(1<<$dim)-1;
+  }
+
+  # $elem has to be [$p1,$p2,...]
+  sub add {
+    my ($self,$elem) = @_;
+    my $p1 = $$elem[0];
+    my $p2 = $$elem[1];
+    for (_hks($self,$p1)) {
+      push @{$self->{start}{$_}}, $elem;
+    }
+    for (_hks($self,$p2)) {
+      push @{$self->{end}{$_}}, $elem;
+    }
+  }
+
+  sub remove {
+    my ($self,$elem) = @_;
+    my $p1 = $$elem[0];
+    my $p2 = $$elem[1];
+    for (_hks($self,$p1)) {
+      my $arr = $self->{start}{$_};
+      if (ref $arr eq "ARRAY") {
+        @$arr = grep $_ != $elem, @$arr;
+      }
+    }
+    for (_hks($self,$p2)) {
+      my $arr = $self->{end}{$_};
+      if (ref $arr eq "ARRAY") {
+        @$arr = grep $_ != $elem, @$arr;
+      }
+    }
+  }
+
+  # $set = 0: start, $set = 1: end, $set = 2: both
+  # only gets one of the closest
+  # returns (element,is_start?0:1,$dist)
+  # an element may be specified that shall be overlooked.
+  sub get {
+    my ($self,$p,$set,$notthisone) = @_;
+    $set++; # now, it's a bitmask
+    my @search;
+    for (_hks($self,$p)) {
+      if ($set & 1) {
+        my $arr = $self->{start}{$_};
+        push @search, [$arr,0] if defined $arr;
+      }
+      if ($set & 2) {
+        my $arr = $self->{end}{$_};
+        push @search, [$arr,1] if defined $arr;
+      }
+    }
+    my ($res,$dist2) = ();
+    for (@search) {
+      my $ix = $$_[1];
+      for my $elem (@{$$_[0]}) {
+        next if defined $notthisone and $elem == $notthisone;
+        my $q = $elem->[$ix];
+        my $d = 0;
+        $d += ($$q[$_]-$$p[$_])**2 for 0..$#$p;
+        if (!defined $dist2 || $d < $dist2) {
+          $res = [$elem,$ix];
+          $dist2 = $d;
+        }
+      }
+    }
+    return () unless defined $dist2 && $dist2 <= $self->{eps2};
+    return $$res[0] unless wantarray;
+    $$res[2] = sqrt($dist2);
+    return @$res;
+  }
+
+  sub as_hash {
+    my ($self) = @_;
+    my $start = $self->{start};
+    my %h;
+    for (values %$start) {
+      for (@$_) {
+        $h{$_} = $_;
+      }
+    }
+    return \%h;
+  }
+
+  # basically "as_array"
+  sub elements {
+    return [values %{shift()->as_hash}];
+  }
+}
+
 sub dxf_extract_polylines {
   my ($dxf) = @_;
   my @res;
@@ -137,8 +257,9 @@ sub bbox_union {
   return \@bbox;
 }
 
+# sort by properties rounded to 1/$crudeness
 sub sort_polylines {
-  my ($lines,$bboxes,$order) = @_;
+  my ($lines,$bboxes,$order,$crudeness) = @_;
   check_polylines($lines,"sort");
 
   # my @bboxes;
@@ -198,7 +319,7 @@ sub sort_polylines {
       partial_sort(sub {$crit->($$bboxes[$a],$$bboxes[$b])},\@perm);
       #@perm = sort {$crit->($bboxes[$a],$bboxes[$b])} @perm;
     } else {
-      @perm = sort {($$bboxes[$a][$$crit[0]] <=> $$bboxes[$b][$$crit[0]])*$$crit[1]} @perm;
+      @perm = sort {(int($$bboxes[$a][$$crit[0]]/$crudeness) <=> int($$bboxes[$b][$$crit[0]]/$crudeness))*$$crit[1]} @perm;
     }
   }
   return ([@$lines[@perm]],[@$bboxes[@perm]]);
@@ -273,7 +394,183 @@ sub coarsify_polylines {
   return \@res;
 }
 
+# sub min_ix(&$) {
+#   my ($cmp,$array) = @_;
+#   return unless @$array;
+#   $cmp //= sub { $a <=> $b };
+#   my $ix = 0;
+#   local $a = $$array[0];
+#   for (1..$#$array) {
+#     local $b = $$array[$_];
+#     if (&$cmp() < 0) {
+#       $ix = $_;
+#       $a = $b;
+#     }
+#   }
+#   return $ix;
+# }
+
 # input is an array of ["closed"|"open",[p_1,...,p_n]], where p_i are [x,y]-points.
+# DONE: make it deterministic again
+sub combine_polylines_fuzzy {
+  my ($lines,$try_join_cycles,$try_reverse_paths,$epsilon) = @_;
+  check_polylines($lines,"combine_fuzzy");
+
+  my (@cycles,@noncycles); # [[start,end,points],...]
+  my $paths = PathSet->new($epsilon);
+
+  for (@$lines) {
+    my ($type,$_points) = @$_;
+    my @points = @$_points;
+    my $closed = $type eq "closed";
+
+    my ($start,$end) = map join(";",@$_), @points[0,-1];
+    if ($closed && $start ne $end) {
+      push @points, [@{$points[0]}];
+      $end = $start;
+    }
+    my $elem = [@points[0,-1],\@points];
+    if ($start eq $end) {
+      push @cycles, $elem;
+      next;
+    }
+    $paths->add($elem);
+    push @noncycles, $elem;
+  }
+  # order: exact forward match, exact reverse match,
+  #        fuzzy forward match, fuzzy reverse match,
+  #        exact&fuzzy cycle joining.
+  # first we try everything exact, then fuzzy.
+  for my $exact (1,0) {
+    # first we try everything forward, then everything forward and backward.
+    # (in the backward case, we might add forward-possibilities by reversing
+    #  a path)
+    for my $rev ($try_reverse_paths?(0,1):(0)) {
+      # Note, that this gives us a list of elements *by reference*.
+      # The contents of the references may be changed during the loop by
+      # changing @$cont.
+      #for my $elem (@{$paths->elements})
+      for my $elem (@noncycles) {
+        next unless defined $elem;
+        # first, try to find an end for our start, then a start for our end.
+        # We do only one join here. The next one has to be done when
+        # it's $cont's turn.
+        for my $ix (0,1) {
+          my $domain = $rev ? 2 : 1-$ix;
+          # we don't want to find the same element.
+          # we do cycle detection later.
+          my ($cont,$ix2,$d) = $paths->get($$elem[$ix],$domain,$elem);
+          #$rev?$elem:undef);
+          # $$elem[$ix] == $$cont[$ix2]
+          next unless defined $cont;
+          next if $exact and $d != 0;
+
+          $paths->remove($elem);
+          if ($cont == $elem) {
+            die "got same element back";# if $rev;
+            ## DONE: make sure that start and end are indeed exactly the same.
+            #push @cycles, $elem;
+            #last;
+          } else {
+            $paths->remove($cont);
+            if ($rev) {
+              # reverse $elem
+              @$elem = [@$elem[1,0],[reverse @{$$elem[2]}]];
+              $ix = 1-$ix2;
+            }
+            splice @{$$cont[2]}, $ix2*@{$$cont[2]},0, @{$$elem[2]};
+            $$cont[$ix2] = $$elem[$ix2];
+            $paths->add($cont);
+            undef $elem; # "remove" from @noncycles
+            last;
+          }
+        }
+      }
+    }
+  }
+  # look for any remaining cycles
+  #for my $elem (@{$paths->elements}) {
+  for my $elem (@noncycles) {
+    next unless defined $elem;
+    # actually we could just compare $$elem[0] and $$elem[1], but that's
+    # unpleasant, and this method already does all the work and gets us an
+    # extra error detection opportunity...
+    my ($cont,$ix2,$d) = $paths->get($$elem[1],0);
+    next unless defined $cont;
+    die "still getting continuations at cycle detecting stage"
+      if $cont != $elem;
+    #next if $exact and $d != 0;
+    $paths->remove($elem);
+    if ($d != 0) {
+      $$elem[1] = $$elem[0];
+      $$elem[2][-1] = [@{$$elem[2][0]}];
+    }
+    # # sort out one point to start from, to make the result deterministic
+    # my $points = $$elem[2];
+    # my $ix = min_ix { $$a[0] <=> $$b[0] || $$a[1] <=> $$b[1] } $points;
+    # $ix = 0 if $ix == $#$points;
+    # @$points = @$points[$ix..$#$points-1,0..$ix];
+    # $$points[-1] = [@{$$points[-1]}];
+    push @cycles, $elem;
+    undef $elem;
+  }
+  # sort the noncycles to make the result somewhat deterministic
+  #@noncycles = sort {$#$a <=> $#$b} @{$paths->elements};
+  @noncycles = grep defined, @noncycles;
+
+  if ($try_join_cycles) {
+    # embed cycles into other paths
+    my %cyclepoints; # pointstr => [i_th_cycle,k_th_pointincycle]
+    # every point gets marked with an unembedded cycle containing it.
+    # duplicate points are used to embed cycles immediately into other cycles.
+    for my $i (0..$#cycles) {
+      next unless defined $cycles[$i];
+      my $c = $cycles[$i][2];
+      for (my $k = 0; $k < $#$c; $k++) {
+        my $p = $$c[$k];
+        my $ps = join(";",@$p);
+        if (defined $cyclepoints{$ps}) {
+          my ($i2,$k2) = @{$cyclepoints{$ps}};
+          if ($i2 != $i && defined $cycles[$i2]) {
+            my @points = @{$cycles[$i2][2]};
+            @points = @points[$k2..$#points-1,0..$k2];
+            $points[-1] = [@{$points[-1]}];
+            splice @$c, $k, 1, @points;
+            undef $cycles[$i2];
+          }
+        }
+        $cyclepoints{$ps} = [$i,$k];
+      }
+    }
+    # non-cycles are scanned for containing cycles.
+    for (@noncycles) {
+      my $c = $$_[2];
+      for (my $j = 0; $j < @$c; $j++) {
+        my $p = $$c[$j];
+        my $ps = join(";",@$p);
+        if (defined $cyclepoints{$ps}) {
+          my ($i,$k) = @{$cyclepoints{$ps}};
+          next unless defined $cycles[$i];
+          my @points = @{$cycles[$i][2]};
+          @points = @points[$k..$#points-1,0..$k];
+          $points[-1] = [@{$points[-1]}];
+          splice @$c, $j, 1, @points;
+          $j += @points-1;
+          undef $cycles[$i];
+        }
+      }
+    }
+    @cycles = grep defined, @cycles;
+  }
+
+  my @paths = (map(["closed",$$_[2]], @cycles),
+               map(["open",$$_[2]], @noncycles));
+
+  return \@paths;
+}
+
+# input is an array of ["closed"|"open",[p_1,...,p_n]], where p_i are [x,y]-points.
+# TODO: order: exact forward match, exact reverse match, fuzzy forward match, fuzzy reverse match, exact cycle joining.
 sub combine_polylines {
   my ($lines,$try_join_cycles,$try_reverse_paths) = @_;
   check_polylines($lines,"combine");
@@ -429,17 +726,19 @@ sub combine_polylines {
     # every point gets marked with an unembedded cycle containing it.
     # duplicate points are used to embed cycles immediately into other cycles.
     for my $i (0..$#cycles) {
-      next unless defined;
+      next unless defined $cycles[$i];
       my $c = $cycles[$i][0];
       for (my $k = 0; $k < $#$c; $k++) {
         my $p = $$c[$k];
         my $ps = join(";",@$p);
-        if (defined $cyclepoints{$ps} && $cyclepoints{$ps}[0] != $i) {
+        if (defined $cyclepoints{$ps}) {
           my ($i2,$k2) = @{$cyclepoints{$ps}};
-          my @points = @{$cycles[$i2][0]};
-          @points = @points[$k2..$#points-1,0..$k2];
-          splice @$c, $k, 1, @points;
-          undef $cycles[$i2];
+          if ($i2 != $i && defined $cycles[$i2]) {
+            my @points = @{$cycles[$i2][0]};
+            @points = @points[$k2..$#points-1,0..$k2];
+            splice @$c, $k, 1, @points;
+            undef $cycles[$i2];
+          }
         }
         $cyclepoints{$ps} = [$i,$k];
       }
@@ -558,9 +857,11 @@ $dxf->flatten;
 
 my $paths = dxf_extract_polylines($dxf);
 
-$paths = combine_polylines($paths,$opts{combine_cycles},$opts{combine_reverse})
+# TODO: make epsilon configurable
+$paths = combine_polylines_fuzzy($paths,$opts{combine_cycles},$opts{combine_reverse},0.001)
   if $opts{combine};
 
+# Note: This assumes, no point is referentially used twice.
 for (@$paths) { # a path
   for my $p (@{$$_[1]}) { # a point
     if (defined $opts{translate}) {
@@ -579,7 +880,7 @@ $paths = coarsify_polylines($paths,$opts{coarsify}*CAMM::units_per_mm)
 my $bboxes = compute_bboxes($paths);
 my $bbox = bbox_union($bboxes);
 
-($paths,$bboxes) = sort_polylines($paths,$bboxes,$opts{sort})
+($paths,$bboxes) = sort_polylines($paths,$bboxes,$opts{sort},40)
   if defined $opts{sort};
 
 unshift @$paths, ["open",[[0,0],[0,2*CAMM::units_per_mm]]]
