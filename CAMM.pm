@@ -426,6 +426,91 @@ sub from_polylines {
 
 my $florex = qr/[-+]?(?:\d+(?:\.\d+)?|\.\d+)(?:[eE][-+]?\d+)?/;
 
+# DONE: is this eventually faster than _take_token?
+#   It is actually 10x faster (16s vs. 2m38s for _take_token; 200k lines input)
+sub _parse_tokens {
+  my ($camm,$context,$cmdsub,$errorsub) = @_;
+  my $esc = $context->{escape_char} // "\003";
+  $errorsub //= sub {
+    my ($ctx,$type,$str,$pos) = @_;
+    (my $s = $type." ($$pos[0]..$$pos[1]): ".$str) =~
+             s/([^\x20-\x7e])/sprintf "\\x%02x",ord($1)/ges;
+    # our header starts with the default escape char to bring the machine
+    # into a known state, which is not conforming to the actual language though.
+    die $s unless $type eq "bad input" and $str =~ /^[\0-\x20]*$/s;
+    #warn $s;
+  };
+  my $camm_parse_rex = qr{
+    \s*+ (?:
+      (?:\^[ \t]*)?(?<cmd>(?<cmdv2>)[A-Z]{2})
+        (?:(?<!LB|WD|DT) (?<args>[^;]*);|
+           (?<=LB|WD)(??{ qr{(?<args>.*?)\Q$esc\E} })|
+           (?<=DT)(?<args>.)[;\n]
+        ) |
+      (?<cmd>![A-Z]{2}) (?<args>[^\n]*) |
+      \e(?<cmd>\.[A-Z@]) (?:(?<args>[^:\n]*):)? |
+      (?<cmd>[A-Z](?![A-Z])) (?<args>[^\n]*) |
+      (?<bad>[^;\n]*);?
+    )
+  }sx;
+  OUTER:
+  while ($camm =~ /\G$camm_parse_rex/g) {
+    my ($cmd,$args,$bad) = @+{qw(cmd args bad)};
+    my $pos = [$-[0],$+[0]];
+    if (defined $bad) {
+      # end of file; also be lenient with extra semicola.
+      next if $bad =~ /^\s*$/;
+      $errorsub->($context,"bad input",$bad,$pos);
+    } else {
+      my $cmdtype = substr($cmd,0,1);
+      $cmdtype = "1" if length($cmd) == 1;
+      $cmdtype = "2" if defined $+{cmdv2};
+      my $check_numeric = 0;
+      my @args = ($args);
+
+      if ($cmd eq "LB" || $cmd eq "WD") {
+      } elsif ($cmd eq "DT") {
+        $esc = $args;
+      } elsif ($cmdtype eq "2") {
+        if ($args =~ /\n/) {
+          $errorsub->($context,"line break in argument to \"$cmd\"",$args,$pos);
+          next;
+        }
+        @args = split /,/,$args;
+        $check_numeric = 1;
+      } elsif ($cmdtype eq "!") {
+        # mode 1 & 2 common
+        $check_numeric = 1;
+      } elsif ($cmdtype eq ".") {
+        # device control instructions over RS-232
+        if (defined $args) {
+          @args = split /;/, $args;
+        } else {
+          @args = ();
+        }
+        $check_numeric = 1;
+      } elsif ($cmdtype eq "1") {
+        # mode 1
+        @args = $cmd eq "P" ? ($args) : split /,/,$args;
+        $check_numeric = 1 if $cmd ne "P";
+      } else {
+        die "cannot be";
+      }
+      if ($check_numeric) {
+        for (@args) {
+          if (/^\s*($florex)\s*$/) {
+            $_ = $1;
+          } else {
+            $errorsub->($context,"non-numerical argument in command \"$cmd\"",$_,$pos);
+            next OUTER;
+          }
+        }
+      }
+      $cmdsub->($context,$cmd,\@args,$pos);
+    }
+  }
+}
+
 sub _take_token {
   my ($camm,$esc) = @_;
   $$camm =~ s/^\s+//;
@@ -629,6 +714,7 @@ our $svg_path_template = <<'EOSVG';
   <path d="%s" style='stroke:%s;' />
 EOSVG
 
+#use Time::HiRes;
 sub to_svgpath {
   my ($self,$camm,$splittable) = @_;
   $self = $self->new unless ref $self;
@@ -638,24 +724,45 @@ sub to_svgpath {
     d => "",
   );
   $self->{$_} //= $defcontext{$_} for keys %defcontext;
-  while ($camm ne "") {
-    my ($cmd,$args) = _take_token(\$camm,$self->{escape_char});
-    if (!defined $cmd) {
-      $camm =~ s/^[^;\n]*[;\n]//;
-      next;
-    }
+
+  _parse_tokens($camm,$self,sub {
+    my ($slf,$cmd,$args,$pos) = @_;
     my $handler = $camm2svg_commands{$cmd};
     if (defined $handler) {
-      $handler->($self,$cmd,@$args) if $handler != 0;
-      if ($splittable && !$self->{down}) {
-        $self->{d} .= " M ".join(",",@{$self->{p}})." ";
+      $handler->($slf,$cmd,@$args) if $handler != 0;
+      if ($splittable && !$slf->{down}) {
+        $slf->{d} .= " M ".join(",",@{$slf->{p}})." ";
       }
     } else {
       warn "ignoring unknown command \"$cmd\"";
     }
-  }
+  });
+
+  # #my %timings;
+  # while ($camm ne "") {
+  #   #my $t1 = time;
+  #   my ($cmd,$args) = _take_token(\$camm,$self->{escape_char});
+  #   #my $t2 = time;
+  #   #$timings{take_token} += $t2-$t1;
+  #   if (!defined $cmd) {
+  #     $camm =~ s/^[^;\n]*[;\n]//;
+  #     next;
+  #   }
+  #   my $handler = $camm2svg_commands{$cmd};
+  #   if (defined $handler) {
+  #     $handler->($self,$cmd,@$args) if $handler != 0;
+  #     if ($splittable && !$self->{down}) {
+  #       $self->{d} .= " M ".join(",",@{$self->{p}})." ";
+  #     }
+  #   } else {
+  #     warn "ignoring unknown command \"$cmd\"";
+  #   }
+  #   #my $t3 = time;
+  #   #$timings{cmd} += $t3-$t2;
+  # }
   my $d = $self->{d};
   delete $self->{d};
+  #print STDERR join(", ",map "$_ = $timings{$_}", sort keys %timings),"\n";
   return $d;
 }
 
@@ -668,7 +775,9 @@ sub to_svg {
   my ($self,$camm,$split,$colored) = @_;
   #$self = $self->new unless ref $self;
   $self = $self->new(output => sub {});
+  #print STDERR "to_svgpath: ".time()."\n";
   my $d = $self->to_svgpath($camm,$split);
+  #print STDERR "splitting: ".time()."\n";
   my $win = $self->{input_window};
   my @origin = (0,0);
   my @size = (100,100);
